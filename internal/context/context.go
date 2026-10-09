@@ -115,6 +115,9 @@ var _ NFContext = &UDRContext{}
 
 // Reset UDR Context
 func (context *UDRContext) Reset() {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
 	context.UESubsCollection.Range(func(key, value interface{}) bool {
 		context.UESubsCollection.Delete(key)
 		return true
@@ -236,6 +239,109 @@ func (context *UDRContext) NewAppDataInfluDataSubscriptionID() uint64 {
 	defer context.mtx.Unlock()
 	context.appDataInfluDataSubscriptionIdGenerator++
 	return context.appDataInfluDataSubscriptionIdGenerator
+}
+
+// The notification subscriptions below are created by the goroutine that serves the SBI request and
+// read by the goroutines that deliver change notifications, so every access to the two maps and
+// their subscription-id generators goes through these methods, which hold mtx.
+//
+// A stored record is never modified after it is put in the map: updating a policy data
+// subscription replaces the record instead, so a record handed out by the accessors stays valid
+// to read without the lock.
+
+func (context *UDRContext) AddSubscriptionDataSubscription(
+	subscription *models.Udr_DR_SubscriptionDataSubscriptions,
+	callbackTarget SubscriptionCallbackTarget,
+) string {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
+	subscriptionID := strconv.Itoa(context.SubscriptionDataSubscriptionIDGenerator)
+	context.SubscriptionDataSubscriptionIDGenerator++
+	context.SubscriptionDataSubscriptions[subscriptionID] = &SubscriptionDataSubscriptionRecord{
+		Subscription:   subscription,
+		CallbackTarget: callbackTarget,
+	}
+	return subscriptionID
+}
+
+func (context *UDRContext) RemoveSubscriptionDataSubscription(subsId string) bool {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
+	if _, ok := context.SubscriptionDataSubscriptions[subsId]; !ok {
+		return false
+	}
+	delete(context.SubscriptionDataSubscriptions, subsId)
+	return true
+}
+
+func (context *UDRContext) SubscriptionDataSubscriptionsSnapshot() []*SubscriptionDataSubscriptionRecord {
+	context.mtx.RLock()
+	defer context.mtx.RUnlock()
+
+	records := make([]*SubscriptionDataSubscriptionRecord, 0, len(context.SubscriptionDataSubscriptions))
+	for _, record := range context.SubscriptionDataSubscriptions {
+		records = append(records, record)
+	}
+	return records
+}
+
+func (context *UDRContext) AddPolicyDataSubscription(
+	subscription *models.Udr_DR_PolicyDataSubscription,
+	callbackTarget SubscriptionCallbackTarget,
+) string {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
+	subscriptionID := strconv.Itoa(context.PolicyDataSubscriptionIDGenerator)
+	context.PolicyDataSubscriptionIDGenerator++
+	context.PolicyDataSubscriptions[subscriptionID] = &PolicyDataSubscriptionRecord{
+		Subscription:   subscription,
+		CallbackTarget: callbackTarget,
+	}
+	return subscriptionID
+}
+
+func (context *UDRContext) RemovePolicyDataSubscription(subsId string) bool {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
+	if _, ok := context.PolicyDataSubscriptions[subsId]; !ok {
+		return false
+	}
+	delete(context.PolicyDataSubscriptions, subsId)
+	return true
+}
+
+// UpdatePolicyDataSubscription replaces the subscription of an existing record and reports whether
+// that record was there.
+func (context *UDRContext) UpdatePolicyDataSubscription(
+	subsId string, subscription *models.Udr_DR_PolicyDataSubscription,
+) bool {
+	context.mtx.Lock()
+	defer context.mtx.Unlock()
+
+	record, ok := context.PolicyDataSubscriptions[subsId]
+	if !ok || record == nil {
+		return false
+	}
+	context.PolicyDataSubscriptions[subsId] = &PolicyDataSubscriptionRecord{
+		Subscription:   subscription,
+		CallbackTarget: record.CallbackTarget,
+	}
+	return true
+}
+
+func (context *UDRContext) PolicyDataSubscriptionsSnapshot() []*PolicyDataSubscriptionRecord {
+	context.mtx.RLock()
+	defer context.mtx.RUnlock()
+
+	records := make([]*PolicyDataSubscriptionRecord, 0, len(context.PolicyDataSubscriptions))
+	for _, record := range context.PolicyDataSubscriptions {
+		records = append(records, record)
+	}
+	return records
 }
 
 func NewInfluenceDataSubscriptionId() string {
